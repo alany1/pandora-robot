@@ -31,21 +31,35 @@ ALIGN_PUPIL_TO_BD = np.array([[ 0, -1,  0, 0],
                               [ 0,  0,  -1, 0],
                               [ 0,  0,  0, 1]], dtype=float)
 
+target_point = [0, 3, 0]
+
 
 @app.spawn(start=True)
 async def main(sess: VuerSession):
     sess.set @ DefaultScene(
         TriMesh(vertices=vertices, faces=faces, key="scene"),
-        Sphere(args=[0.25, 20, 20], position=tag_aria_tf[:3, -1].tolist(), material=dict(color="yellow"), key="fudicial")
+        Sphere(
+            args=[0.1, 20, 20],
+            position=tag_aria_tf[:3, -1].tolist(),
+            material=dict(color="yellow"),
+            key="fudicial",
+        ),
+        Sphere(
+            args=[0.1, 20, 20],
+            position=target_point,
+            material=dict(color="blue"),
+            key="target",
+        ),
     )
     
     
     while True:
         robot_tag_tf = streamer.body_transform_matrix()
         robot_aria_tf = tag_aria_tf @ ALIGN_PUPIL_TO_BD @ robot_tag_tf
+        point_to_robot = np.linalg.inv(robot_aria_tf) @ np.array([[*target_point, 1]]).T
         
         position = robot_aria_tf[:3, -1].tolist()
-        print(position)
+        print(point_to_robot)
         
         sess.upsert @ Sphere(args=[0.1, 20, 20], position=position, material=dict(color="red"), key="spot")
         await sleep(0.1)
