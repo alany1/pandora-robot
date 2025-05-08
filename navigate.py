@@ -91,8 +91,8 @@ def drive_half_meter(robot):
         # Build BODY-frame 0.5 m SE2 trajectory -------------------------------
         snapshot = state_client.get_robot_state().kinematic_state.transforms_snapshot
         traj_cmd = RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
-            goal_x_rt_body=-2.3872,  # forward half-meter
-            goal_y_rt_body=0.22,
+            goal_x_rt_body=0,  # forward half-meter
+            goal_y_rt_body=-0.22,
             goal_heading_rt_body=0,
             frame_tree_snapshot=snapshot,  # not needed for body-frame
         )
