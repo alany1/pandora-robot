@@ -31,7 +31,10 @@ ALIGN_PUPIL_TO_BD = np.array([[ 0, -1,  0, 0],
                               [ 0,  0,  -1, 0],
                               [ 0,  0,  0, 1]], dtype=float)
 
-target_point = [0, 3, 0]
+# target_point = [0, 3, 0]
+target_point = [-0.7, 0, -0.5]
+target_point = [-0.97574752,  0.18065326, -0.50076877]
+
 
 
 @app.spawn(start=True)
