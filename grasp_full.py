@@ -8,6 +8,7 @@
 """
 
 import argparse
+import math
 import sys
 import time
 
@@ -18,7 +19,7 @@ import bosdyn.client.util
 import numpy as np
 from bosdyn.api import arm_command_pb2, geometry_pb2
 from bosdyn.client import math_helpers
-from bosdyn.client.frame_helpers import BODY_FRAME_NAME, ODOM_FRAME_NAME, HAND_FRAME_NAME, get_a_tform_b
+from bosdyn.client.frame_helpers import BODY_FRAME_NAME, ODOM_FRAME_NAME, get_a_tform_b
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
 from bosdyn.client.robot_command import (RobotCommandBuilder, RobotCommandClient,
                                          blocking_stand)
@@ -100,13 +101,104 @@ def get_translation_command(*, robot_state, dx, dy, dheading):
     )
     return traj_cmd
 
-def make_aria_grasp_to_robot_command(*, standoff_pt, grasp_pt, robot_aria_tf, robot_state, )
+    
+def get_translation_command_from_aria(
+        *,
+        target_position,          # (x,y,z) of where you want the body
+        lookat_position,          # (x,y,z) the body +X should face
+        body_T_aria,              # 4×4 H-matrix BODY←ARIA  (or its inverse)
+        robot_state
+        ):
+    """
+    Returns a RobotCommand that walks Spot so its BODY origin ends up at
+    `target_position` (in ARIA) while yaw-facing `lookat_position`.
+    """
+    # 1.  Put both points into BODY coordinates.
+    H = np.linalg.inv(body_T_aria)          # ARIA→BODY
+    p_target_body  = (H @ np.append(target_position, 1))[:3]
+    p_lookat_body  = (H @ np.append(lookat_position, 1))[:3]
+
+    dx, dy         = p_target_body[:2]      # relative stride in BODY (m)
+    # 2.  Desired final yaw of BODY (+X axis) so it faces the look-at point.
+    vec            = p_lookat_body[:2] - p_target_body[:2]
+    dheading       = math.atan2(vec[1], vec[0])  # rad, CCW+ like ROS
+    
+    snapshot = robot_state.kinematic_state.transforms_snapshot
+    
+    # 3.  Build the trajectory command in BODY frame.
+    traj_cmd = RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
+        goal_x_rt_body     = dx,
+        goal_y_rt_body     = dy,
+        goal_heading_rt_body = dheading,
+        frame_tree_snapshot = snapshot)         # snapshot not needed for BODY
+    return traj_cmd
+
+def make_aria_grasp_to_robot_command(*, standoff_pt, grasp_pt, robot_aria_tf, robot_state, ):
     """
     Standoff and grasp are both in the aria frame.
+    This is intended for cases where you need to align the gripper (stand-off -> execute framework)
+    Not for pulling, etc.
     """
     standoff_to_robot = (np.linalg.inv(robot_aria_tf) @ np.array([[*standoff_pt, 1]]).T).T[0]
     grasp_to_robot = (np.linalg.inv(robot_aria_tf) @ np.array([[*grasp_pt, 1]]).T).T[0]
+    return make_robot_grasp_to_robot_command(
+        standoff_to_robot=standoff_to_robot,
+        grasp_to_robot=grasp_to_robot,
+        robot_state=robot_state,
+    )
+    # 
+    # x, y, z = [standoff_to_robot[0], standoff_to_robot[1], -standoff_to_robot[2]]
+    # x2, y2, z2 = [grasp_to_robot[0], grasp_to_robot[1], -grasp_to_robot[2]]
+    # 
+    # p_standoff = np.array([x, y, z])  # current hand position (m)
+    # p_grasp = np.array([x2, y2, z2])  # target grasp point   (m)
+    # 
+    # v = p_grasp - p_standoff  # 3-D vector from standoff → grasp
+    # v_norm = np.linalg.norm(v)
+    # if v_norm < 1e-6:
+    #     raise ValueError("Standoff and grasp are basically the same point.")
+    # v_hat = v / v_norm  # unit direction vector
+    # 
+    # hand_x = np.array([1.0, 0.0, 0.0])  # +X of the hand/tool frame
+    # q_align = quat_from_two_vectors(hand_x, v_hat)
+    # 
+    # odom_T_hand = get_a_tform_b(
+    #     robot_state.kinematic_state.transforms_snapshot,
+    #     ODOM_FRAME_NAME,
+    #     BODY_FRAME_NAME,
+    # ) * math_helpers.SE3Pose(
+    #     x=p_standoff[0],
+    #     y=p_standoff[1],
+    #     z=p_standoff[2],
+    #     rot=math_helpers.Quat(*q_align),
+    # )
+    # 
+    # walk_req = make_walk_request(odom_T_hand, standoff=0.4)
+    # 
+    # arm_command = RobotCommandBuilder.arm_pose_command(odom_T_hand.x,
+    #                                                    odom_T_hand.y,
+    #                                                    odom_T_hand.z,
+    #                                                    odom_T_hand.rot.w,
+    #                                                    odom_T_hand.rot.x,
+    #                                                    odom_T_hand.rot.y,
+    #                                                    odom_T_hand.rot.z,
+    #                                                    ODOM_FRAME_NAME,
+    #                                                    5.0,)
+    # 
+    # return dict(walk_req=walk_req, arm_command=arm_command)
 
+
+def make_robot_grasp_to_robot_command(
+    *,
+    standoff_to_robot,
+    grasp_to_robot,
+    robot_state,
+):
+    """
+    Standoff and grasp are both in the robot base frame.
+    This is intended for cases where you need to align the gripper (stand-off -> execute framework)
+    Not for pulling, etc.
+    """
     x, y, z = [standoff_to_robot[0], standoff_to_robot[1], -standoff_to_robot[2]]
     x2, y2, z2 = [grasp_to_robot[0], grasp_to_robot[1], -grasp_to_robot[2]]
 
@@ -135,17 +227,68 @@ def make_aria_grasp_to_robot_command(*, standoff_pt, grasp_pt, robot_aria_tf, ro
 
     walk_req = make_walk_request(odom_T_hand, standoff=0.4)
 
-    arm_command = RobotCommandBuilder.arm_pose_command(odom_T_hand.x,
-                                                       odom_T_hand.y,
-                                                       odom_T_hand.z,
-                                                       odom_T_hand.rot.w,
-                                                       odom_T_hand.rot.x,
-                                                       odom_T_hand.rot.y,
-                                                       odom_T_hand.rot.z,
-                                                       ODOM_FRAME_NAME,
-                                                       5.0,)
-    
+    arm_command = RobotCommandBuilder.arm_pose_command(
+        odom_T_hand.x,
+        odom_T_hand.y,
+        odom_T_hand.z,
+        odom_T_hand.rot.w,
+        odom_T_hand.rot.x,
+        odom_T_hand.rot.y,
+        odom_T_hand.rot.z,
+        ODOM_FRAME_NAME,
+        5.0,
+    )
+
     return dict(walk_req=walk_req, arm_command=arm_command)
+
+
+from bosdyn.client import frame_helpers
+
+
+def slide_hand_along_body(direction_vec_body: np.ndarray,
+                          distance: float,
+                          robot_state) -> "bosdyn.api.RobotCommand":
+    """
+    Move the wrist along a vector expressed in BODY coordinates without
+    changing orientation.
+
+    Parameters
+    ----------
+    direction_vec_body : (3,) np.ndarray
+        Desired direction in the BODY frame (X fwd, Y left, Z up).
+        It need not be normalized.
+    distance : float
+        Signed distance in metres to travel along `direction_vec_body`.
+    robot_state : bosdyn.api.RobotState
+        Fresh state message (e.g. robot_state_client.get_robot_state()).
+
+    Returns
+    -------
+    bosdyn.api.RobotCommand
+        A synchro arm command: send with RobotCommandClient.robot_command().
+    """
+    # -- 1.  Normalise direction & scale -------------------------------
+    direction = direction_vec_body / np.linalg.norm(direction_vec_body)
+    delta_xyz = distance * direction            # (dx,dy,dz) in BODY
+
+    # -- 2.  Get current BODY→HAND transform ---------------------------
+    snapshot      = robot_state.kinematic_state.transforms_snapshot
+    body_T_hand   = frame_helpers.get_a_tform_b(
+                        snapshot,
+                        frame_helpers.BODY_FRAME_NAME,
+                        frame_helpers.HAND_FRAME_NAME)
+
+    # -- 3.  Build goal pose in BODY -----------------------------------
+    goal_pos_body = body_T_hand.get_translation() + delta_xyz
+    quat_body     = body_T_hand.rotation  # unchanged
+
+    arm_cmd = RobotCommandBuilder.arm_pose_command(
+        goal_pos_body[0], goal_pos_body[1], goal_pos_body[2],
+        quat_body.w, quat_body.x, quat_body.y, quat_body.z,
+        frame_helpers.BODY_FRAME_NAME,
+        seconds=4.0)                      # tune horizon as needed
+
+    return arm_cmd
     
 def hello_arm(config):
     """A simple example of using the Boston Dynamics API to command Spot's arm."""
@@ -195,12 +338,28 @@ def hello_arm(config):
         )
         
         # standoff point
-        # target_point = [-0.589,  0.064, -0.134]
-        # target_point = [-0.755, 0.181, -0.205]
-        # grasp_point = [-0.8074752,  0.18065326, -0.50076877]
+        grasp_standoff_aria = [-0.755, 0.181, -0.205]
+        grasp_target_aria = [-0.8074752,  0.18065326, -0.50076877]
+        grasp_direction_vector = np.array([-0.17469142, -0.00115431, -0.98462256])
         
-        target_point = [-0.97574752, 0.18065326, -0.50576877]
-        grasp_point = [-1.0574752, 0.19065326, -0.50576877]
+        target_point = np.array([-0.97574752, 0.18065326, -0.50576877])
+        articulation_dir = np.array([ 0.99380106, -0.1032366 , -0.04125227])
+        grasp_point = np.array([-1.0574752, 0.19065326, -0.50576877])
+        for _ in range(20):
+            robot_tag_tf = streamer.body_transform_matrix()
+            
+        body_T_aria = tag_aria_tf @ ALIGN_PUPIL_TO_BD @ robot_tag_tf
+        robot_state = robot_state_client.get_robot_state() 
+
+        locate_cmd = get_translation_command_from_aria(target_position=target_point+1.0*articulation_dir, 
+                                                       lookat_position=target_point,
+                                                       body_T_aria=body_T_aria,
+                                                       robot_state=robot_state)
+        cmd_id = command_client.robot_command(locate_cmd, end_time_secs=time.time() + 5.0)
+        if not _wait_for_traj_stop(command_client, cmd_id):
+            print("⚠️  Spot may not have reached the full 0.5 m, continuing anyway.")
+        
+        # DONT FORGET THIS!!!!!!!!!!!!!!!!!!!!!
         for _ in range(20):
             robot_tag_tf = streamer.body_transform_matrix()
         robot_aria_tf = tag_aria_tf @ ALIGN_PUPIL_TO_BD @ robot_tag_tf
@@ -214,15 +373,15 @@ def hello_arm(config):
         walk_req = cmds['walk_req']
         arm_command = cmds['arm_command']
         
-        walk_resp = manip_client.manipulation_api_command(walk_req)
-
-        if not wait_until_done(manip_client, walk_resp.manipulation_cmd_id):
-            print("Walk step failed — aborting.")
-            return
+        # walk_resp = manip_client.manipulation_api_command(walk_req)
+        # 
+        # if not wait_until_done(manip_client, walk_resp.manipulation_cmd_id):
+        #     print("Walk step failed — aborting.")
+        #     return
         
 
         # Make the open gripper RobotCommand
-        gripper_command = RobotCommandBuilder.claw_gripper_open_fraction_command(0.4)
+        gripper_command = RobotCommandBuilder.claw_gripper_open_fraction_command(0.6)
         command = RobotCommandBuilder.build_synchro_command(gripper_command, arm_command)
 
         cmd_id = command_client.robot_command(command)
@@ -231,112 +390,188 @@ def hello_arm(config):
             robot.logger.info("⚠️  Spot may not have reached the full 0.5 m, continuing anyway.")
         
         time.sleep(2)
-        return
-        ################3
-        robot_tag_tf = streamer.body_transform_matrix()
 
-        robot_aria_tf = tag_aria_tf @ ALIGN_PUPIL_TO_BD @ robot_tag_tf
-        grasp_to_robot = (
-            np.linalg.inv(robot_aria_tf) @ np.array([[*grasp_point, 1]]).T
-        ).T[0]
-        x2, y2, z2 = [grasp_to_robot[0], grasp_to_robot[1], -grasp_to_robot[2]]
-
-        p_grasp = np.array([x2, y2, z2])  # target grasp point   (m)
-        body_T_hand = get_a_tform_b(
-            robot_state_client.get_robot_state().kinematic_state.transforms_snapshot,
-            BODY_FRAME_NAME,  # or GRAV_ALIGNED_BODY_FRAME_NAME
-            HAND_FRAME_NAME,
-        )  # literal "hand" works too
-
-        current_hand_pos = np.array([body_T_hand.position.x, 
-                                     body_T_hand.position.y, 
-                                     body_T_hand.position.z])
-
-        print("current hand pos", current_hand_pos)
-        v_new = p_grasp - current_hand_pos  # 3-D vector from standoff → grasp
-        v_norm_new = np.linalg.norm(v_new)
-        if v_norm_new < 1e-6:
-            raise ValueError("Standoff and grasp are basically the same point.")
-        v_hat_new = v_new / v_norm_new  # unit direction vector
-        q_align_new = quat_from_two_vectors(hand_x, v_hat_new)
-        
-        robot_state = robot_state_client.get_robot_state()
-        odom_T_hand = get_a_tform_b(
-            robot_state.kinematic_state.transforms_snapshot,
-            ODOM_FRAME_NAME,
-            BODY_FRAME_NAME,
-        ) * math_helpers.SE3Pose(
-            x=p_grasp[0],
-            y=p_grasp[1],
-            z=p_grasp[2],
-            rot=math_helpers.Quat(*q_align_new),
+        close_gripper_command = RobotCommandBuilder.claw_gripper_close_command(
+            0.0, max_torque=7.5
         )
+        cmd_id = command_client.robot_command(
+            close_gripper_command, end_time_secs=time.time() + 2.0
+        )
+        robot.logger.info("Closing gripper.")
 
-        walk_req = make_walk_request(odom_T_hand, standoff=0.4)
+        time.sleep(2.0)
+
+        # pull according to the articulation axis
+        for _ in range(20):
+            robot_tag_tf = streamer.body_transform_matrix()
+        robot_aria_tf = tag_aria_tf @ ALIGN_PUPIL_TO_BD @ robot_tag_tf
+
+        robot_state = robot_state_client.get_robot_state()
+        pull_direction_body = (np.linalg.inv(robot_aria_tf) @ np.array([[*articulation_dir, 0]]).T).T[0][:3]
+        pull_cmd = slide_hand_along_body(direction_vec_body=pull_direction_body,
+                                         distance=0.5,
+                                         robot_state=robot_state)
+        cmd_id = command_client.robot_command(pull_cmd)
+        
+        robot.logger.info('Pulling arm along the articulation axis.')
+        if not _wait_for_traj_stop(command_client, cmd_id):
+            robot.logger.info(
+                "⚠️  Spot may not have reached the full 0.5 m, continuing anyway."
+            )
+        time.sleep(2.0)
+
+        # let go
+        gripper_command = RobotCommandBuilder.claw_gripper_open_fraction_command(0.8)
+        cmd_id = command_client.robot_command(gripper_command)
+        
+        time.sleep(2.0)
+        
+        # step back, and get the arm into the appropriate position.
+        for _ in range(20):
+            robot_tag_tf = streamer.body_transform_matrix()
+        robot_aria_tf = tag_aria_tf @ ALIGN_PUPIL_TO_BD @ robot_tag_tf
+        robot_state = robot_state_client.get_robot_state()
+        
+        backup_cmd = get_translation_command(robot_state=robot_state, dx=-0.5, dy=0, dheading=0)
+        cmd_id = command_client.robot_command(
+            backup_cmd, end_time_secs=time.time() + 5.0
+        )
+        if not _wait_for_traj_stop(command_client, cmd_id):
+            print("⚠️  Spot may not have reached the full 0.5 m, continuing anyway.")
+            
+        prev_robot_aria_tf = robot_aria_tf.copy()
+        for _ in range(20):
+            robot_tag_tf = streamer.body_transform_matrix()
+        robot_aria_tf = tag_aria_tf @ ALIGN_PUPIL_TO_BD @ robot_tag_tf
+        robot_state = robot_state_client.get_robot_state()
+        standoff_to_prev_robot = (
+            np.linalg.inv(prev_robot_aria_tf) @ np.array([[*grasp_standoff_aria, 1]]).T
+        ).T[0]
+        grasp_to_prev_robot = (
+            np.linalg.inv(prev_robot_aria_tf) @ np.array([[*grasp_target_aria, 1]]).T
+        ).T[0]
+        
+        cmds = make_robot_grasp_to_robot_command(standoff_to_robot=standoff_to_prev_robot,
+                                          grasp_to_robot=grasp_to_prev_robot,
+                                          robot_state=robot_state)
+        arm_cmd = cmds["arm_command"]
+
+        cmd_id = command_client.robot_command(arm_cmd)
+        robot.logger.info("Moving arm to grasp standoff position.")
+        if not _wait_for_traj_stop(command_client, cmd_id):
+            robot.logger.info(
+                "⚠️  Spot may not have reached the full 0.5 m, continuing anyway."
+            )
+
+        time.sleep(2)
+
+        for _ in range(20):
+            robot_tag_tf = streamer.body_transform_matrix()
+        robot_aria_tf = tag_aria_tf @ ALIGN_PUPIL_TO_BD @ robot_tag_tf
+        robot_state = robot_state_client.get_robot_state()
+        
+        cmds = make_aria_grasp_to_robot_command(standoff_pt=grasp_standoff_aria,
+                                         grasp_pt=grasp_target_aria,
+                                         robot_aria_tf=robot_aria_tf,
+                                         robot_state=robot_state,)
+
+        walk_req = cmds["walk_req"]
+        arm_command = cmds["arm_command"]
+
         walk_resp = manip_client.manipulation_api_command(walk_req)
+
         if not wait_until_done(manip_client, walk_resp.manipulation_cmd_id):
             print("Walk step failed — aborting.")
             return
 
-        time.sleep(2.0)
-
-        # 3. Use it, but navigate first.
-        # grasp_command = hand_body_to_arm_cmd(point_body=p_standoff + 1.0*v,
-        #                                      quat_body=q_align,
-        #                                      robot_state=robot_state,
-        #                                      delta=5.0)
-
-        grasp_command = RobotCommandBuilder.arm_pose_command(
-            odom_T_hand.x,
-            odom_T_hand.y,
-            odom_T_hand.z,
-            odom_T_hand.rot.w,
-            odom_T_hand.rot.x,
-            odom_T_hand.rot.y,
-            odom_T_hand.rot.z,
-            ODOM_FRAME_NAME,
-            5.0,
+        # Make the open gripper RobotCommand
+        gripper_command = RobotCommandBuilder.claw_gripper_open_fraction_command(0.4)
+        command = RobotCommandBuilder.build_synchro_command(
+            gripper_command, arm_command
         )
 
-
-        cmd_id = command_client.robot_command(grasp_command, end_time_secs=time.time()+5.0)
-        robot.logger.info('Moving arm to position 2.')
+        cmd_id = command_client.robot_command(command)
+        robot.logger.info("Moving arm to position 1.")
         if not _wait_for_traj_stop(command_client, cmd_id):
-            robot.logger.info("⚠️  Spot may not have reached the full 0.5 m, continuing anyway.")
-        # block_until_arm_arrives_with_prints(robot, command_client, cmd_id)
-        # #
-        time.sleep(2.0)
+            robot.logger.info(
+                "⚠️  Spot may not have reached the full 0.5 m, continuing anyway."
+            )
+
+        time.sleep(2)
         
-        # close gripper
-        close_gripper_command = RobotCommandBuilder.claw_gripper_close_command(0.0, max_torque=5)
-        cmd_id = command_client.robot_command(close_gripper_command, end_time_secs=time.time()+2.0)
-        robot.logger.info('Closing gripper.')
-
-        time.sleep(1.0)
-
-
-        robot_state = robot_state_client.get_robot_state()
-        robot_tag_tf = streamer.body_transform_matrix()
-
+        for _ in range(20):
+            robot_tag_tf = streamer.body_transform_matrix()
         robot_aria_tf = tag_aria_tf @ ALIGN_PUPIL_TO_BD @ robot_tag_tf
-        grasp_to_robot = (
-                np.linalg.inv(robot_aria_tf) @ np.array([[*target_point, 1]]).T
-        ).T[0]
-        p_standoff = np.array([grasp_to_robot[0], grasp_to_robot[1], -grasp_to_robot[2]])
+        robot_state = robot_state_client.get_robot_state()
 
-        grasp_command = hand_body_to_arm_cmd(point_body=p_standoff,
-                                             quat_body=q_align_new,
-                                             robot_state=robot_state,
-                                             delta=2.0)
-        
-        cmd_id = command_client.robot_command(grasp_command, end_time_secs=time.time()+5.0)
-        robot.logger.info('Moving arm back to standoff.')
+        grasp_ghost_target_aria = grasp_target_aria + 0.1 * grasp_direction_vector
+        cmds = make_aria_grasp_to_robot_command(standoff_pt=grasp_target_aria,
+                                         grasp_pt=grasp_ghost_target_aria,
+                                         robot_aria_tf=robot_aria_tf,
+                                         robot_state=robot_state,)
+
+        arm_command = cmds["arm_command"]
+        cmd_id = command_client.robot_command(arm_command)
+        robot.logger.info("Moving arm to position 1.")
         if not _wait_for_traj_stop(command_client, cmd_id):
-            robot.logger.info("⚠️  Spot may not have reached the full 0.5 m, continuing anyway.")
-        # 
-        # block_until_arm_arrives_with_prints(robot, command_client, cmd_id)
-        # 
-        time.sleep(5)
+            robot.logger.info(
+                "⚠️  Spot may not have reached the full 0.5 m, continuing anyway."
+            )
+
+        time.sleep(2)
+
+        close_gripper_command = RobotCommandBuilder.claw_gripper_close_command(
+            0.0, max_torque=7.5
+        )
+        cmd_id = command_client.robot_command(
+            close_gripper_command, end_time_secs=time.time() + 2.0
+        )
+        robot.logger.info("Closing gripper.")
+
+        time.sleep(2.0)
+
+        # return to standoff
+        for _ in range(20):
+            robot_tag_tf = streamer.body_transform_matrix()
+        robot_aria_tf = tag_aria_tf @ ALIGN_PUPIL_TO_BD @ robot_tag_tf
+        robot_state = robot_state_client.get_robot_state()
+        
+        pull_direction_body = (
+            np.linalg.inv(robot_aria_tf) @ np.array([[*grasp_direction_vector, 0]]).T
+        ).T[0][:3]
+        # negative super important!!!!!!!!!
+        pull_cmd = slide_hand_along_body(
+            direction_vec_body=pull_direction_body,
+            distance=0.3,
+            robot_state=robot_state,
+        )
+        cmd_id = command_client.robot_command(pull_cmd)
+
+        robot.logger.info("Pulling arm along the articulation axis.")
+        if not _wait_for_traj_stop(command_client, cmd_id):
+            robot.logger.info(
+                "⚠️  Spot may not have reached the full 0.5 m, continuing anyway."
+            )
+        time.sleep(2.0)
+
+        # step back, and get the arm into the appropriate position.
+        for _ in range(20):
+            robot_tag_tf = streamer.body_transform_matrix()
+        robot_aria_tf = tag_aria_tf @ ALIGN_PUPIL_TO_BD @ robot_tag_tf
+        robot_state = robot_state_client.get_robot_state()
+
+        backup_cmd = get_translation_command(
+            robot_state=robot_state, dx=-0.5, dy=0, dheading=0
+        )
+        cmd_id = command_client.robot_command(
+            backup_cmd, end_time_secs=time.time() + 5.0
+        )
+        if not _wait_for_traj_stop(command_client, cmd_id):
+            print("⚠️  Spot may not have reached the full 0.5 m, continuing anyway.")
+            
+        time.sleep(3.0)
+
+        return
 
         robot.logger.info('Done.')
 
