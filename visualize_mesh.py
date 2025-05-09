@@ -22,15 +22,16 @@ faces = mesh.faces
 
 app = Vuer()
 
-target_point = [-0.8074752,  0.18065326, -0.50076877]
-best_dir     = [0.176, 0.,    0.984]
+# target_point = [-0.8074752,  0.18065326, -0.50076877]
+# best_dir     = [0.176, 0.,    0.984]
 # standoff_point = [-0.719,  0.181, -0.009] # 0.5
-standoff_point = [-0.755, 0.181, -0.205] # 0.3 
+# standoff_point = [-0.755, 0.181, -0.205] # 0.3 
 # standoff_point = [-0.589,  0.064, -0.134]
 
 # target_point = [1.5,  -1.0, -0.50076877]
 # standoff_point = [1.606, -0.53, -0.368]
 
+target_point = [-0.97574752, 0.18065326, -0.9576877]
 
 
 @app.spawn(start=True)
@@ -43,12 +44,12 @@ async def main(sess: VuerSession):
             material=dict(color="blue"),
             key="target",
         ),
-        Sphere(
-            args=[0.1, 20, 20],
-            position=standoff_point,
-            material=dict(color="red"),
-            key="standoff",
-        ),
+        # Sphere(
+        #     args=[0.1, 20, 20],
+        #     position=standoff_point,
+        #     material=dict(color="red"),
+        #     key="standoff",
+        # ),
     )
 
 

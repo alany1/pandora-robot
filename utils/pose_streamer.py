@@ -77,6 +77,47 @@ class FiducialPoseStreamerSE2:
         except KeyboardInterrupt:
             print("\n[SE2 stream stopped]")
 
+import numpy as np
+from scipy.spatial.transform import Rotation as R
+import numpy as np
+from bosdyn.client.math_helpers import SE3Pose, Quat          # whatever path you use
+
+def mean_se3(pose_list):
+    """
+    Average a list of math_helpers.SE3Pose objects.
+    Returns a new SE3Pose (same class).
+
+    Notes
+    -----
+    • All quaternions are first flipped to the same hemisphere so the
+      mean is well-defined.
+    • Works well as long as the rotations are not scattered over >180 °.
+    """
+    if len(pose_list) == 0:
+        raise ValueError("pose_list is empty")
+
+    # -------- 1. mean translation -----------------------------------------
+    xyz = np.array([[p.x, p.y, p.z] for p in pose_list])
+    t_bar = xyz.mean(axis=0)
+
+    # -------- 2. mean rotation (Markley) ----------------------------------
+    M = np.zeros((4, 4))
+    for p in pose_list:
+        q = np.array([p.rot.w, p.rot.x, p.rot.y, p.rot.z], dtype=float)
+        if q[0] < 0:                          # enforce hemisphere
+            q = -q
+        M += np.outer(q, q)
+
+    # principal (largest-eigenvalue) eigenvector  →  mean quaternion
+    eigvals, eigvecs = np.linalg.eigh(M)
+    q_bar = eigvecs[:, eigvals.argmax()]
+    if q_bar[0] < 0:                          # optional: keep w ≥ 0
+        q_bar = -q_bar
+    q_bar = Quat(q_bar[0], q_bar[1], q_bar[2], q_bar[3])
+
+    # -------- 3. assemble -------------------------------------------------
+    return SE3Pose(t_bar[0], t_bar[1], t_bar[2], q_bar)
+
 
 # ===============================================================  SE(3)  ==
 class FiducialPoseStreamerSE3:
@@ -95,9 +136,20 @@ class FiducialPoseStreamerSE3:
         wo_client   = robot.ensure_client(WorldObjectClient.default_service_name)
 
         tag_obj, fid_frame = _wait_for_tag(wo_client, tag_id)
-        odom_T_fid         = get_a_tform_b(tag_obj.transforms_snapshot,
-                                           ODOM_FRAME_NAME, fid_frame)
-        self._fid_T_odom   = odom_T_fid.inverse()
+        tfs = []
+        for _ in range(100):
+            odom_T_fid         = get_a_tform_b(tag_obj.transforms_snapshot,
+                                               ODOM_FRAME_NAME, fid_frame)
+            tfs.append(odom_T_fid.inverse())
+            
+        print(len(tfs))
+            
+        # make avg
+        self._fid_T_odom = mean_se3(tfs)
+            
+            
+        
+        # self._fid_T_odom   = odom_T_fid.inverse()
         print(f"[SE3] Using frame {fid_frame}")
 
     # ---------------------------------------------------------------- API --

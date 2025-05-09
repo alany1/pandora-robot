@@ -152,7 +152,9 @@ def hello_arm(config):
         # target_point = [-0.589,  0.064, -0.134]
         target_point = [-0.755, 0.181, -0.205]
         grasp_point = [-0.8074752,  0.18065326, -0.50076877]
-
+        
+        target_point = [-0.97574752, 0.18065326, -0.50576877]
+        grasp_point = [-1.0574752, 0.19065326, -0.50576877]
         for _ in range(20):
             robot_tag_tf = streamer.body_transform_matrix()
         
@@ -219,7 +221,7 @@ def hello_arm(config):
                                                            5.0,)
 
         # Make the open gripper RobotCommand
-        gripper_command = RobotCommandBuilder.claw_gripper_open_fraction_command(0.7)
+        gripper_command = RobotCommandBuilder.claw_gripper_open_fraction_command(0.4)
 
         # Combine the arm and gripper commands into one RobotCommand
         command = RobotCommandBuilder.build_synchro_command(gripper_command, arm_command)
@@ -230,6 +232,8 @@ def hello_arm(config):
         if not _wait_for_traj_stop(command_client, cmd_id):
             robot.logger.info("⚠️  Spot may not have reached the full 0.5 m, continuing anyway.")
         
+        time.sleep(2)
+        return
         ################3
         robot_tag_tf = streamer.body_transform_matrix()
 

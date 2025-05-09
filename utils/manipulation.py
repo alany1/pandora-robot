@@ -1,5 +1,6 @@
 import time
 
+import numpy as np
 from bosdyn.api import manipulation_api_pb2 as mp, geometry_pb2
 
 def make_walk_request(odom_T_hand, frame="odom", standoff=0.10):
@@ -21,6 +22,11 @@ def make_walk_request(odom_T_hand, frame="odom", standoff=0.10):
     # ---- ray start: a point *behind* the target so the planner knows
     #      which side of the object to stop on
     dir_vec = odom_T_hand.rot.transform_point(1, 0, 0)  # +X of hand
+    # set z to zero and normalize
+    d = np.array(dir_vec)
+    d[2] = 0
+    d = d / np.linalg.norm(d)
+    print(d, dir_vec)
     walk.ray_start_rt_frame.CopyFrom(geometry_pb2.Vec3(
         x=odom_T_hand.x - standoff * dir_vec[0],
         y=odom_T_hand.y - standoff * dir_vec[1],
